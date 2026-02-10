@@ -37,7 +37,11 @@ config = {
     "author": "your.email@example.com",
     "name": "research_agent",
     "description": "A research assistant agent",
-    "deployment": {"url": "http://localhost:3773", "expose": True},
+    "deployment": {
+        "url": "http://localhost:3773",
+        "expose": True,
+        "cors_origins": ["http://localhost:5173"]
+    },
     "skills": ["skills/question-answering", "skills/pdf-processing"],
     
     # Negotiation API keys loaded from: OPENROUTER_API_KEY, MEM0_API_KEY, EXA_API_KEY

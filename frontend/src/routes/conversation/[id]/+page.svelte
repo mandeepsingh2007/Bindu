@@ -15,9 +15,9 @@
 	import { addChildren } from "$lib/utils/tree/addChildren";
 	import { addSibling } from "$lib/utils/tree/addSibling";
 	import { fetchMessageUpdates } from "$lib/utils/messageUpdates";
+	import { sendAgentMessage } from "$lib/utils/agentMessageHandler";
 	import type { v4 } from "uuid";
 	import { useSettingsStore } from "$lib/stores/settings.js";
-	import { enabledServers } from "$lib/stores/mcpServers";
 	import { browser } from "$app/environment";
 	import {
 		addBackgroundGeneration,
@@ -29,14 +29,32 @@
 	import SubscribeModal from "$lib/components/SubscribeModal.svelte";
 	import { loading } from "$lib/stores/loading.js";
 	import { requireAuthUser } from "$lib/utils/auth.js";
+	import { invalidate } from "$app/navigation";
+	import { UrlDependency } from "$lib/types/UrlDependency";
 
 	let { data = $bindable() } = $props();
 
 	let pending = $state(false);
 	let initialRun = true;
 	let showSubscribeModal = $state(false);
+	let isWritingMessage = false; // Guard to prevent concurrent writeMessage calls
 
 	let files: File[] = $state([]);
+	
+	// Track current task for A2A protocol compliance
+	let currentTaskId: string | null = $state(null);
+	let currentTaskState: string | null = $state(null);
+	
+	// Reply-to-task threading (explicit reply target)
+	let replyToTaskId: string | null = $state(null);
+	
+	function setReplyTo(taskId: string) {
+		replyToTaskId = taskId;
+	}
+	
+	function clearReply() {
+		replyToTaskId = null;
+	}
 
 	let conversations = $state(data.conversations);
 	$effect(() => {
@@ -106,6 +124,14 @@
 		messageId?: ReturnType<typeof v4>;
 		isRetry?: boolean;
 	}): Promise<void> {
+		// Prevent concurrent calls
+		if (isWritingMessage) {
+			console.warn('⚠️ writeMessage already in progress, ignoring duplicate call');
+			return;
+		}
+		
+		isWritingMessage = true;
+		
 		try {
 			$isAborted = false;
 			$loading = true;
@@ -212,25 +238,41 @@
 
 			const messageUpdatesAbortController = new AbortController();
 
-			const messageUpdatesIterator = await fetchMessageUpdates(
-				page.params.id,
-				{
-					base,
-					inputs: prompt,
-					messageId,
-					isRetry,
-					files: isRetry ? userMessage?.files : base64Files,
-					selectedMcpServerNames: $enabledServers.map((s) => s.name),
-					selectedMcpServers: $enabledServers.map((s) => ({
-						name: s.name,
-						url: s.url,
-						headers: s.headers,
-					})),
-				},
-				messageUpdatesAbortController.signal
-			).catch((err) => {
-				error.set(err.message);
-			});
+			// Check if using Bindu agent model - use direct API
+			const currentModel = findCurrentModel(data.models, data.oldModels, data.model);
+			const useDirectAgentAPI = currentModel?.id === 'bindu' || currentModel?.name === 'bindu';
+
+			let messageUpdatesIterator;
+			
+			if (useDirectAgentAPI) {
+				// Use direct agent API with task state tracking and reply support
+				messageUpdatesIterator = sendAgentMessage(
+					prompt ?? '',
+					page.params.id!,
+					messageUpdatesAbortController.signal,
+					currentTaskId ?? undefined,
+					currentTaskState ?? undefined,
+					replyToTaskId ?? undefined
+				);
+				// Clear reply after sending
+				clearReply();
+			} else {
+				// Use existing backend flow
+				messageUpdatesIterator = await fetchMessageUpdates(
+					page.params.id!,
+					{
+						base,
+						inputs: prompt,
+						messageId,
+						isRetry,
+						files: isRetry ? userMessage?.files : base64Files,
+					},
+					messageUpdatesAbortController.signal
+				).catch((err) => {
+					error.set(err.message);
+				});
+			}
+			
 			if (messageUpdatesIterator === undefined) return;
 
 			files = [];
@@ -244,155 +286,122 @@
 					return;
 				}
 
-				// Remove null characters added due to remote keylogging prevention
-				// See server code for more details
-				if (update.type === MessageUpdateType.Stream) {
-					update.token = update.token.replaceAll("\0", "");
+				// Skip keep-alive updates
+				if (update.type === MessageUpdateType.Status && update.status === MessageUpdateStatus.KeepAlive) {
+					continue;
 				}
 
-				const isKeepAlive =
-					update.type === MessageUpdateType.Status &&
-					update.status === MessageUpdateStatus.KeepAlive;
-
-				if (!isKeepAlive) {
-					if (update.type === MessageUpdateType.Stream) {
-						const existingUpdates = messageToWriteTo.updates ?? [];
-						const lastUpdate = existingUpdates.at(-1);
-						if (lastUpdate?.type === MessageUpdateType.Stream) {
-							// Create fresh objects/arrays so the UI reacts to merged tokens
-							const merged = {
-								...lastUpdate,
-								token: (lastUpdate.token ?? "") + (update.token ?? ""),
-							};
-							messageToWriteTo.updates = [...existingUpdates.slice(0, -1), merged];
+				// Handle different update types
+				switch (update.type) {
+					case MessageUpdateType.Stream:
+						update.token = update.token.replaceAll("\0", "");
+						const updates = messageToWriteTo.updates ?? [];
+						const last = updates.at(-1);
+						if (last?.type === MessageUpdateType.Stream) {
+							messageToWriteTo.updates = [...updates.slice(0, -1), { ...last, token: last.token + update.token }];
 						} else {
-							messageToWriteTo.updates = [...existingUpdates, update];
+							messageToWriteTo.updates = [...updates, update];
 						}
-					} else {
-						messageToWriteTo.updates = [...(messageToWriteTo.updates ?? []), update];
-					}
-				}
-				const currentTime = new Date();
-
-				// If we receive a non-stream update (e.g. tool/status/final answer),
-				// flush any buffered stream tokens so the UI doesn't appear to cut
-				// mid-sentence while tools are running or the final answer arrives.
-				if (
-					update.type !== MessageUpdateType.Stream &&
-					!$settings.disableStream &&
-					buffer.length > 0
-				) {
-					messageToWriteTo.content += buffer;
-					buffer = "";
-					lastUpdateTime = currentTime;
-				}
-
-				if (update.type === MessageUpdateType.Stream && !$settings.disableStream) {
-					buffer += update.token;
-					// Check if this is the first update or if enough time has passed
-					if (currentTime.getTime() - lastUpdateTime.getTime() > updateDebouncer.maxUpdateTime) {
-						messageToWriteTo.content += buffer;
-						buffer = "";
-						lastUpdateTime = currentTime;
-					}
-					pending = false;
-				} else if (update.type === MessageUpdateType.FinalAnswer) {
-					// Mirror server-side merge behavior so the UI reflects the
-					// final text once tools complete, while preserving any
-					// pre‑tool streamed content when appropriate.
-					const finalText = update.text ?? "";
-					const isInterrupted = update.interrupted === true;
-					const hadTools =
-						messageToWriteTo.updates?.some((u) => u.type === MessageUpdateType.Tool) ?? false;
-
-					if (isInterrupted) {
-						// Preserve streamed content on abort. If we never streamed, fall back to finalText.
-						if (!messageToWriteTo.content) {
-							messageToWriteTo.content = finalText;
-						}
-					} else if (hadTools) {
-						const existing = messageToWriteTo.content;
-						const trimmedExistingSuffix = existing.replace(/\s+$/, "");
-						const trimmedFinalPrefix = finalText.replace(/^\s+/, "");
-						const alreadyStreamed =
-							finalText &&
-							(existing.endsWith(finalText) ||
-								(trimmedFinalPrefix.length > 0 &&
-									trimmedExistingSuffix.endsWith(trimmedFinalPrefix)));
-
-						if (existing && existing.length > 0) {
-							if (alreadyStreamed) {
-								// A. Already streamed the same final text; keep as-is.
-								messageToWriteTo.content = existing;
-							} else if (
-								finalText &&
-								(finalText.startsWith(existing) ||
-									(trimmedExistingSuffix.length > 0 &&
-										trimmedFinalPrefix.startsWith(trimmedExistingSuffix)))
-							) {
-								// B. Final text already includes streamed prefix; use it verbatim.
-								messageToWriteTo.content = finalText;
-							} else {
-								// C. Merge with a paragraph break for readability.
-								const needsGap = !/\n\n$/.test(existing) && !/^\n/.test(finalText ?? "");
-								messageToWriteTo.content = existing + (needsGap ? "\n\n" : "") + finalText;
+						if (!$settings.disableStream) {
+							buffer += update.token;
+							const now = Date.now();
+							if (now - lastUpdateTime.getTime() > updateDebouncer.maxUpdateTime) {
+								messageToWriteTo.content += buffer;
+								buffer = "";
+								lastUpdateTime = new Date(now);
 							}
-						} else {
-							messageToWriteTo.content = finalText;
+							pending = false;
 						}
-					} else {
-						// No tools: final answer replaces streamed content so
-						// the provider's final text is authoritative.
-						messageToWriteTo.content = finalText;
-					}
-				} else if (
-					update.type === MessageUpdateType.Status &&
-					update.status === MessageUpdateStatus.Error
-				) {
-					// Check if this is a 402 payment required error
-					if (update.statusCode === 402) {
-						showSubscribeModal = true;
-					} else {
-						$error = update.message ?? "An error has occurred";
-					}
-				} else if (update.type === MessageUpdateType.Title) {
-					const convInData = conversations.find(({ id }) => id === page.params.id);
-					if (convInData) {
-						convInData.title = update.title;
+						break;
 
-						$titleUpdate = {
-							title: update.title,
-							convId: page.params.id,
+					case MessageUpdateType.FinalAnswer:
+						if (buffer && !$settings.disableStream) {
+							messageToWriteTo.content += buffer;
+							buffer = "";
+						}
+						// Simple logic: if interrupted keep existing, otherwise use final text
+						if (!update.interrupted) {
+							messageToWriteTo.content = update.text ?? "";
+						} else if (!messageToWriteTo.content) {
+							messageToWriteTo.content = update.text ?? "";
+						}
+						messageToWriteTo.updates = [...(messageToWriteTo.updates ?? []), update];
+						break;
+
+					case MessageUpdateType.Status:
+						if (update.status === MessageUpdateStatus.Error) {
+							if (update.statusCode === 402) {
+								showSubscribeModal = true;
+							} else {
+								$error = update.message ?? "An error has occurred";
+							}
+						} else if (update.status === MessageUpdateStatus.Finished) {
+							// Stop polling - message is complete
+							pending = false;
+						}
+						messageToWriteTo.updates = [...(messageToWriteTo.updates ?? []), update];
+						break;
+
+					case MessageUpdateType.Title:
+						const conv = conversations.find(({ id }) => id === page.params.id);
+						if (conv) {
+							conv.title = update.title;
+							$titleUpdate = { title: update.title, convId: page.params.id! };
+						}
+						break;
+
+					case MessageUpdateType.File:
+						messageToWriteTo.files = [
+							...(messageToWriteTo.files ?? []),
+							{ type: "hash", value: update.sha, mime: update.mime, name: update.name }
+						];
+						break;
+
+					case MessageUpdateType.RouterMetadata:
+						messageToWriteTo.routerMetadata = { route: update.route, model: update.model };
+						break;
+
+					case MessageUpdateType.TaskMetadata:
+						messageToWriteTo.taskMetadata = {
+							taskId: update.taskId,
+							contextId: update.contextId,
+							status: update.status,
+							...(update.referenceTaskIds && { referenceTaskIds: update.referenceTaskIds })
 						};
-					}
-				} else if (update.type === MessageUpdateType.File) {
-					messageToWriteTo.files = [
-						...(messageToWriteTo.files ?? []),
-						{ type: "hash", value: update.sha, mime: update.mime, name: update.name },
-					];
-				} else if (update.type === MessageUpdateType.RouterMetadata) {
-					// Update router metadata immediately when received
-					messageToWriteTo.routerMetadata = {
-						route: update.route,
-						model: update.model,
-					};
+						messageToWriteTo.updates = [...(messageToWriteTo.updates ?? []), update];
+						
+						// Track task state for A2A protocol compliance
+						currentTaskId = update.taskId;
+						currentTaskState = update.status;
+						
+						// Note: Don't invalidate conversation list here for agent conversations
+						// as it causes data reload which clears the local message state
+						break;
+
+					default:
+						messageToWriteTo.updates = [...(messageToWriteTo.updates ?? []), update];
 				}
+			}
+			
+			// Flush any remaining buffer
+			if (buffer && !$settings.disableStream) {
+				messageToWriteTo.content += buffer;
 			}
 		} catch (err) {
 			if (err instanceof Error && err.message.includes("overloaded")) {
 				$error = "Too much traffic, please try again.";
 			} else if (err instanceof Error && err.message.includes("429")) {
 				$error = ERROR_MESSAGES.rateLimited;
-			} else if (err instanceof Error) {
-				$error = err.message;
 			} else {
-				$error = ERROR_MESSAGES.default;
+				console.error(err);
+				$error = err instanceof Error ? err.message : String(err);
 			}
-			console.error(err);
 		} finally {
 			$loading = false;
 			pending = false;
-			await invalidateAll();
+			clearReply();
+			isWritingMessage = false; // Reset guard
+			// No invalidateAll() - causes reload loop. UI updates reactively.
 		}
 	}
 
@@ -421,11 +430,12 @@
 			files = $pendingMessage.files;
 			await writeMessage({ prompt: $pendingMessage.content });
 			$pendingMessage = undefined;
+			return;
 		}
 
-		const streaming = isConversationStreaming(messages);
-		if (streaming) {
-			addBackgroundGeneration({ id: page.params.id, startedAt: Date.now() });
+		// Only check streaming if not already loading (prevents re-trigger on reload)
+		if (!$loading && isConversationStreaming(messages)) {
+			addBackgroundGeneration({ id: page.params.id!, startedAt: Date.now() });
 			$loading = true;
 		}
 	});
@@ -481,7 +491,7 @@
 		}
 
 		if (!streaming && browser) {
-			removeBackgroundGeneration(page.params.id);
+			removeBackgroundGeneration(page.params.id!);
 		}
 	});
 
@@ -533,6 +543,9 @@
 	onretry={onRetry}
 	onshowAlternateMsg={onShowAlternateMsg}
 	onstop={stopGeneration}
+	onReplyToTask={setReplyTo}
+	replyToTaskId={replyToTaskId}
+	onClearReply={clearReply}
 	models={data.models}
 	currentModel={findCurrentModel(data.models, data.oldModels, data.model)}
 />

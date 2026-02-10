@@ -1,13 +1,12 @@
-"""Joke Telling Entertainment Agent
+"""Research Assistant Agent
 
-A Bindu agent that tells jokes and entertains users.
-Provides witty, clean humor with customizable topics.
+A Bindu agent that finds and summarizes information.
+Uses DuckDuckGo for web search capabilities.
 
 Features:
-- Puns, dad jokes, tech jokes, situational humor
-- Topic-specific joke generation
-- Web search for trending content
-- OpenRouter integration with gpt-oss-120b
+- Web search integration
+- Information summarization
+- Research assistance
 
 Usage:
     python agno_simple_example.py
@@ -28,18 +27,9 @@ load_dotenv()
 
 # Define your agent
 agent = Agent(
-    instructions=(
-        "You are a witty joke-telling agent. "
-        "Your job is to entertain users with clever, clean, and funny jokes. "
-        "You can tell puns, dad jokes, tech jokes, and situational humor. "
-        "Keep the tone light, playful, and human-like. "
-        "If a topic is given, tailor the joke to that topic."
-    ),
-    model=OpenRouter(
-        id="openai/gpt-oss-120b",
-        api_key=os.getenv("OPENROUTER_API_KEY")
-    ),
-    tools=[DuckDuckGoTools()],  # optional: for topical or trending jokes
+    instructions="You are a research assistant that finds and summarizes information.",
+    model=OpenRouter(id="openai/gpt-5-mini", api_key=os.getenv("OPENROUTER_API_KEY")),
+    tools=[DuckDuckGoTools()],
 )
 
 
@@ -48,10 +38,14 @@ agent = Agent(
 # automatically loaded from environment variables. See .env.example for details.
 config = {
     "author": "your.email@example.com",
-    "name": "joke_agent",
+    "name": "research_agent",
     "description": "A research assistant agent",
-    "deployment": {"url": "http://localhost:3773", "expose": True},
-    "skills": ["skills/question-answering", "skills/pdf-processing"],
+    "deployment": {
+        "url": "http://localhost:3773",
+        "expose": True,
+        "cors_origins": ["http://localhost:5173"]
+    },
+    "skills": ["skills/question-answering", "skills/pdf-processing"]
 }
 
 
@@ -70,7 +64,8 @@ def handler(messages: list[dict[str, str]]):
 
 
 # Bindu-fy it
-bindufy(config, handler, launch=True)
-
-# To make your agent publicly accessible via tunnel, add launch=True:
-# bindufy(config, handler, launch=True)
+if __name__ == "__main__":
+    # Disable auth for local development - frontend can connect without OAuth
+    import os
+    os.environ["AUTH_ENABLED"] = "false"
+    bindufy(config, handler)
