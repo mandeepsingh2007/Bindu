@@ -65,22 +65,7 @@ Before installing Bindu, ensure you have:
 
 - **Python 3.12 or higher** - [Download here](https://www.python.org/downloads/)
 - **UV package manager** - [Installation guide](https://github.com/astral-sh/uv)
-- **Note**: You will need an OPENROUTER_API_KEY (or OpenAI key) set in your environment variables to run the agent successfully.
-
-### 🔑 No OpenAI Credits? Use Free OpenRouter Models (Recommended)
-
-Bindu supports OpenRouter out of the box, giving you access to multiple free and paid LLM providers using a single API key.
-
-This is the easiest way to run Bindu without OpenAI billing.
-
-**Steps:**
-
-1. Get a free API key from: https://openrouter.ai
-2. Set your environment variable:
-
-   **PowerShell (Windows):**
-   ```powershell
-   $env:OPENROUTER_API_KEY="your_key_here"  # pragma: allowlist secret
+- **Note**: You will need an OPENROUTER_API_KEY (or OpenAI key) set in your environment variables to run the agent successfully.You can use free open router models for testing.
 
 
 ### Verify Your Setup
@@ -99,7 +84,7 @@ uv --version
 
 ## 📦 Installation
 <details>
-<summary><b>Windows users note (Git & GitHub Desktop)</b></summary>
+<summary><b>Users note (Git & GitHub Desktop)</b></summary>
 
 On some Windows systems, git may not be recognized in Command Prompt even after installation due to PATH configuration issues.
 
@@ -213,6 +198,9 @@ def handler(messages: list[dict[str, str]]):
 
 # Bindu-fy it
 bindufy(config, handler)
+
+# if you want to use tunnel to expose your agent to the internet, use the following command
+#bindufy(config, handler, launch=True)
 ```
 
 ![Sample Agent](assets/agno-simple.png)
@@ -254,6 +242,9 @@ config = {
 }
 
 bindufy(config, handler)
+
+# if you want to use tunnel to expose your agent to the internet, use the following command
+#bindufy(config, handler, launch=True)
 ```
 
 **Run and test:**
@@ -435,8 +426,11 @@ The storage layer uses three main tables:
 Configure PostgreSQL connection via environment variables:
 
 ```bash
+# You can find in the env.example file
+# Storage Configuration
+# Type: "postgres" for PostgreSQL or "memory" for in-memory storage
 STORAGE_TYPE=postgres
-DATABASE_URL=postgresql+asyncpg://<username>:<password>@localhost:5432/bindu
+DATABASE_URL=postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>?ssl=require
 ```
 
 Then use the simplified config:
@@ -473,8 +467,11 @@ Its Optional - InMemoryScheduler is used by default.
 Configure Redis connection via environment variables:
 
 ```bash
+# You can find in the env.example file
+# Scheduler Configuration
+# Type: "redis" for distributed scheduling or "memory" for single-process
 SCHEDULER_TYPE=redis
-REDIS_URL=redis://localhost:6379/0
+REDIS_URL=rediss://default:<password>@<host>:<port>
 ```
 
 Then use the simplified config:
@@ -530,6 +527,14 @@ Sentry is a real-time error tracking and performance monitoring platform that he
 <details>
 <summary><b>View configuration example</b> (click to expand)</summary>
 
+```bash
+#You can find in the env.example file
+# Sentry Error Tracking (Optional)
+# Enable error tracking and performance monitoring
+SENTRY_ENABLED=true
+SENTRY_DSN=https://<key>@<org-id>.ingest.sentry.io/<project-id>
+```
+
 Configure Sentry directly in your `bindufy()` config:
 
 ```python
@@ -538,8 +543,7 @@ config = {
     "name": "echo_agent",
     "description": "A basic echo agent for quick testing.",
     "deployment": {"url": "http://localhost:3773", "expose": True},
-    "skills": [],
-    # Storage, scheduler, sentry, and telemetry are now configured via environment variables
+    "skills": []
 }
 
 def handler(messages):
@@ -548,16 +552,6 @@ def handler(messages):
 
 bindufy(config, handler)
 ```
-
-**Environment Variables:**
-
-```bash
-# Sentry Error Tracking (Optional)
-SENTRY_ENABLED=true
-SENTRY_DSN=https://<key>@<org-id>.ingest.sentry.io/<project-id>
-
-# See examples/.env.example for complete configuration
-``
 
 </details>
 
@@ -973,45 +967,6 @@ config = {
 
 <br/>
 
-## Task Feedback and DSPy
-
-Bindu collects user feedback on task executions to enable continuous improvement through DSPy optimization. By storing feedback with ratings and metadata, you can build golden datasets from real interactions and use DSPy to automatically optimize your agent's prompts and behavior.
-
-### Submitting Feedback
-
-Provide feedback on any task using the `tasks/feedback` method:
-
-```bash
-curl --location 'http://localhost:3773/' \
---header 'Content-Type: application/json' \
---header 'Authorization: Bearer <your-token>' \
---data '{
-    "jsonrpc": "2.0",
-    "method": "tasks/feedback",
-    "params": {
-        "taskId": "550e8400-e29b-41d4-a716-446655440200",
-        "feedback": "Great job! The response was very helpful and accurate.",
-        "rating": 5,
-        "metadata": {
-            "category": "quality",
-            "source": "user",
-            "helpful": true
-        }
-    },
-    "id": "550e8400-e29b-41d4-a716-446655440024"
-}'
-```
-
-Feedback is stored in the `task_feedback` table and can be used to:
-- Filter high-quality task interactions for training data
-- Identify patterns in successful vs. unsuccessful completions
-- Optimize agent instructions and few-shot examples with DSPy
-- We are working on the DsPY - will release soon.
-
----
-
-<br/>
-
 ## OpenTelemetry
 
 Bindu integrates with **OpenTelemetry (OTEL)** to provide observability and tracing for your agents. Track agent execution, monitor performance, and debug issues using industry-standard observability platforms like **Arize** and **Langfuse**.
@@ -1042,14 +997,6 @@ OLTP_HEADERS={"Authorization":"Basic <base64-encoded-public-key:secret-key>"}
 OLTP_VERBOSE_LOGGING=true
 ```
 
-### Features
-
-- **Automatic Instrumentation**: Traces are automatically generated for agent execution, skill invocations, and LLM calls
-- **Distributed Tracing**: Track requests across multiple services and workers
-- **Performance Monitoring**: Measure latency, token usage, and resource consumption
-- **Error Tracking**: Capture exceptions and failures with full context
-- **Custom Attributes**: Add metadata to traces for filtering and analysis
-
 ### Platform-Specific Setup
 
 **Langfuse:**
@@ -1076,8 +1023,6 @@ OLTP_VERBOSE_LOGGING=true
    OLTP_HEADERS={"space_id":"<your-space-id>","api_key":"<your-api-key>"}
    OLTP_VERBOSE_LOGGING=true  # Optional
    ```
-
-
 
 ---
 
@@ -1207,7 +1152,8 @@ For tasks that run longer than typical request timeouts (minutes, hours, or days
 
 ## 🎨 Chat UI
 
-Bindu includes a beautiful chat interface at `http://localhost:3773/docs`
+Please go to frontend folder and run `npm run dev` to start the frontend server.
+Bindu includes a beautiful chat interface at `http://localhost:5173`
 
 <p align="center">
   <img src="assets/agent-ui.png" alt="Bindu Agent UI" width="640" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);" />
